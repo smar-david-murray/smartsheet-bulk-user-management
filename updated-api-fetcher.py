@@ -1,95 +1,105 @@
 import requests
 import time
-import json
+import os
+import math
 
 # Configuration
-API_TOKEN = 'YOUR_SMARTSHEET_ACCESS_TOKEN'
+API_TOKEN = os.getenv('SMARTSHEET_ACCESS_TOKEN', 'YOUR_RAW_TOKEN_HERE')
 BASE_URL = 'https://api.smartsheet.com/2.0'
 HEADERS = {
     'Authorization': f'Bearer {API_TOKEN}',
     'Content-Type': 'application/json'
 }
 
-def get_plan_id():
+def make_request_with_backoff(url, params=None):
     """
-    Step 1: Get the current authenticated user's organization Plan ID.
-    This is required to fetch specific 'seatType' data in the user list.
+    Custom wrapper to implement Exponential Backoff for Rate Limiting (429).
+    Docs: https://developers.smartsheet.com/api/smartsheet/guides/advanced-topics/scalability-options
     """
-    response = requests.get(f'{BASE_URL}/users/me', headers=HEADERS)
-    response.raise_for_status()
-    data = response.json()
+    max_retries = 5
+    attempt = 0
     
-    # Navigate the response object to find the Plan ID
-    # Structure usually: account -> plan -> id
+    while attempt < max_retries:
+        response = requests.get(url, headers=HEADERS, params=params)
+        
+        # SUCCESS (200 OK)
+        if response.status_code == 200:
+            return response.json()
+            
+        # RATE LIMIT HIT (429 Too Many Requests)
+        elif response.status_code == 429:
+            # 1. Try to get the server's requested wait time
+            # 2. Fallback to Exponential Backoff: 2s, 4s, 8s, 16s...
+            retry_header = response.headers.get('Retry-After')
+            
+            if retry_header:
+                wait_time = int(retry_header) + 1 # Add buffer
+                print(f"⚠️ Rate limit hit. Server requested wait: {wait_time}s")
+            else:
+                wait_time = math.pow(2, attempt + 1)
+                print(f"⚠️ Rate limit hit. Backing off for {wait_time}s...")
+            
+            time.sleep(wait_time)
+            attempt += 1
+            continue
+            
+        # OTHER ERRORS (401, 403, 500)
+        else:
+            response.raise_for_status()
+            
+    # If we exit the loop, we failed too many times
+    raise Exception(f"Max retries ({max_retries}) exceeded for {url}")
+
+def get_plan_id():
     try:
-        plan_id = data['account']['plan']['id']
-        print(f"✅ Found Plan ID: {plan_id}")
-        return plan_id
-    except KeyError:
-        print("❌ Could not retrieve Plan ID. Ensure your account is part of an Enterprise Plan.")
+        data = make_request_with_backoff(f'{BASE_URL}/users/me')
+        plan_id = data.get('account', {}).get('plan', {}).get('id')
+        if plan_id:
+            return plan_id
+        print("❌ Plan ID not found.")
+        return None
+    except Exception as e:
+        print(f"Error getting Plan ID: {e}")
         return None
 
-def get_all_users(plan_id):
-    """
-    Step 2: Fetch all users using the Plan ID to populate 'seatType'.
-    Handles pagination automatically.
-    """
+def get_all_users_manual(plan_id):
     users = []
     page = 1
-    has_more_pages = True
+    page_size = 100
+    has_more = True
     
-    print("Fetching users...")
+    print("Fetching users with Manual Exponential Backoff...")
     
-    while has_more_pages:
-        # We pass planId here to force the API to return seatType (Member/Guest/Viewer)
+    while has_more:
         params = {
             'include': 'lastLogin',
             'planId': plan_id,
-            'pageSize': 100,
+            'pageSize': page_size,
             'page': page
         }
         
         try:
-            response = requests.get(f'{BASE_URL}/users', headers=HEADERS, params=params)
+            # Call our robust wrapper instead of requests.get directly
+            data = make_request_with_backoff(f'{BASE_URL}/users', params=params)
             
-            # Simple Rate Limit Handling (Exponential Backoff could be added here)
-            if response.status_code == 429:
-                print("Rate limit hit. Sleeping for 30s...")
-                time.sleep(30)
-                continue
-                
-            response.raise_for_status()
-            data = response.json()
+            current_batch = data.get('data', [])
+            users.extend(current_batch)
+            print(f"  - Page {page}: Retrieved {len(current_batch)} users.")
             
-            # Add current page of users to our master list
-            users.extend(data['data'])
-            
-            # Check if there are more pages
-            total_pages = data['totalPages']
+            total_pages = data.get('totalPages', 0)
             if page >= total_pages:
-                has_more_pages = False
+                has_more = False
             else:
                 page += 1
-                # Small courtesy sleep to be nice to the API
-                time.sleep(0.5) 
                 
         except Exception as e:
-            print(f"Error on page {page}: {str(e)}")
+            print(f"❌ Failed on page {page}: {e}")
             break
             
     return users
 
-# --- Execution Flow ---
 if __name__ == "__main__":
     my_plan_id = get_plan_id()
-    
     if my_plan_id:
-        all_users = get_all_users(my_plan_id)
-        print(f"✅ Successfully retrieved {len(all_users)} users.")
-        
-        # Example: Print the first 5 users to verify seatType exists
-        print("\nSample Data (First 5):")
-        for user in all_users[:5]:
-            # Now we can see correct Seat Type instead of inferring from licensedSheetCreator
-            print(f"- {user['email']}: {user.get('seatType', 'UNKNOWN')} "
-                  f"(Last Login: {user.get('lastLogin', 'NEVER')})")
+        all_users = get_all_users_manual(my_plan_id)
+        print(f"✅ Total Users Retrieved: {len(all_users)}")
