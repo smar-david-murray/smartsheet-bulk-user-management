@@ -1,15 +1,15 @@
 import csv
 from datetime import datetime
 
-# Path to your manually downloaded CSV report
+# Configuration
 CSV_FILE_PATH = 'User_Type_Report.csv'
 
-def parse_user_report(file_path):
+def parse_user_report_sdk_style(file_path):
     """
-    Reads the Smartsheet User Type Report CSV.
-    Extracts Email, Created Date, and usage metrics.
+    Parses the User Type Report CSV.
+    Returns a dictionary formatted to mimic Smartsheet SDK objects (snake_case).
     """
-    user_database = {}
+    user_db = {}
     
     try:
         with open(file_path, mode='r', encoding='utf-8-sig') as csvfile:
@@ -19,44 +19,53 @@ def parse_user_report(file_path):
                 email = row.get('Email')
                 
                 if email:
-                    # Parse the "Created Date" (Format in CSV is usually MM/DD/YYYY)
-                    # Adjust format string based on your specific CSV locale
-                    raw_date = row.get('Created Date', '')
-                    try:
-                        created_dt = datetime.strptime(raw_date, '%m/%d/%y') # e.g., 01/14/25
-                        formatted_date = created_dt.strftime('%Y-%m-%d')
-                    except ValueError:
-                        formatted_date = None # Handle missing or malformed dates
+                    # 1. Parse Created Date (Critical field missing from API)
+                    raw_created = row.get('Created Date', '')
+                    formatted_created = None
+                    if raw_created:
+                        try:
+                            # Adjust format matches your CSV (e.g. MM/DD/YYYY or DD/MM/YYYY)
+                            dt = datetime.strptime(raw_created, '%m/%d/%y')
+                            formatted_created = dt.strftime('%Y-%m-%d')
+                        except ValueError:
+                            pass # Keep as None if parse fails
 
-                    # Capture Usage Data (if available in your report columns)
-                    # Note: Column names must match the CSV headers exactly
-                    user_database[email] = {
+                    # 2. Parse Usage Stats (Available in Report but not API)
+                    try:
+                        sheet_count = int(row.get('Owned Sheets', 0) or 0)
+                    except ValueError:
+                        sheet_count = 0
+
+                    # 3. Build Record (SDK-Style snake_case keys)
+                    user_db[email] = {
+                        'email': email,
                         'first_name': row.get('First Name'),
                         'last_name': row.get('Last Name'),
                         'status': row.get('Status'),
-                        'created_at': formatted_date,
+                        'seat_type': row.get('User Type'), # Maps to seatType
+                        'created_at': formatted_created,   # The missing link
                         'last_login': row.get('Last Login'),
-                        'sheet_count': row.get('Owned Sheets', 0)
+                        'sheet_count': sheet_count,
+                        'source': 'csv_report'
                     }
                     
-        return user_database
+        return user_db
 
     except FileNotFoundError:
-        print(f"Error: The file {file_path} was not found.")
+        print(f"❌ Error: File '{file_path}' not found.")
         return {}
 
 # --- Execution Flow ---
 if __name__ == "__main__":
-    print(f"Parsing {CSV_FILE_PATH}...")
-    db = parse_user_report(CSV_FILE_PATH)
+    print(f"Reading report: {CSV_FILE_PATH}...")
+    db = parse_user_report_sdk_style(CSV_FILE_PATH)
     
     print(f"✅ Loaded {len(db)} users from report.")
     
-    # Example: Check for recent creations (e.g., last 30 days logic)
-    # This simulates the 'Account Age' check you wanted
-    sample_email = "example.user@company.com"
-    if sample_email in db:
-        user = db[sample_email]
-        print(f"\nUser: {sample_email}")
-        print(f"Created On: {user['created_at']}")
-        print(f"Status: {user['status']}")
+    # Validation
+    test_email = "john.doe@example.com" # Replace with a real email to test
+    if test_email in db:
+        user = db[test_email]
+        print(f"\nUser Found: {user['email']}")
+        print(f"Account Age (Created): {user['created_at']}")
+        print(f"Sheets Owned: {user['sheet_count']}")
